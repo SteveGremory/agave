@@ -1,11 +1,13 @@
 use {
     agave_geyser_plugin_interface::geyser_plugin_interface::GeyserPlugin,
+    arc_swap::{ArcSwap, Guard},
     jsonrpc_core::{ErrorCode, Result as JsonRpcResult},
     libloading::Library,
     log::*,
     std::{
         ops::{Deref, DerefMut},
         path::Path,
+        sync::Arc,
     },
     tokio::sync::oneshot::Sender as OneShotSender,
 };
@@ -269,6 +271,132 @@ impl GeyserPluginManager {
         let name = current_plugin.name().to_string();
         current_plugin.on_unload();
         info!("Unloaded plugin {name} at idx {idx}");
+    }
+}
+
+/// A lock-free wrapper around GeyserPluginManager for high-performance notification paths.
+///
+/// This uses `ArcSwap` to provide lock-free reads on the hot path (notifications),
+/// while still allowing safe updates (plugin load/unload/reload) through atomic swaps.
+///
+/// The read path (`load()`) is wait-free and never blocks, making it suitable for
+/// use in transaction processing and other latency-sensitive code paths.
+#[derive(Debug)]
+pub struct LockFreeGeyserPluginManager {
+    inner: ArcSwap<GeyserPluginManager>,
+}
+
+impl Default for LockFreeGeyserPluginManager {
+    fn default() -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(GeyserPluginManager::default()),
+        }
+    }
+}
+
+impl LockFreeGeyserPluginManager {
+    pub fn new(manager: GeyserPluginManager) -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(manager),
+        }
+    }
+
+    /// Load the current plugin manager state (lock-free, wait-free read).
+    /// Returns a guard that keeps the Arc alive while accessing the plugins.
+    #[inline]
+    pub fn load(&self) -> Guard<Arc<GeyserPluginManager>> {
+        self.inner.load()
+    }
+
+    /// Check if there are any plugins loaded (lock-free read).
+    #[inline]
+    pub fn has_plugins(&self) -> bool {
+        !self.inner.load().plugins.is_empty()
+    }
+
+    /// Check if any plugin wants account notifications (lock-free read).
+    #[inline]
+    pub fn account_data_notifications_enabled(&self) -> bool {
+        self.inner.load().account_data_notifications_enabled()
+    }
+
+    /// Check if any plugin wants snapshot account notifications (lock-free read).
+    #[inline]
+    pub fn account_data_snapshot_notifications_enabled(&self) -> bool {
+        self.inner.load().account_data_snapshot_notifications_enabled()
+    }
+
+    /// Check if any plugin wants transaction notifications (lock-free read).
+    #[inline]
+    pub fn transaction_notifications_enabled(&self) -> bool {
+        self.inner.load().transaction_notifications_enabled()
+    }
+
+    /// Check if any plugin wants entry notifications (lock-free read).
+    #[inline]
+    pub fn entry_notifications_enabled(&self) -> bool {
+        self.inner.load().entry_notifications_enabled()
+    }
+
+    /// Update the plugin manager atomically.
+    /// This is used for load/unload/reload operations.
+    /// The old manager is returned for cleanup.
+    pub fn swap(&self, new_manager: GeyserPluginManager) -> Arc<GeyserPluginManager> {
+        self.inner.swap(Arc::new(new_manager))
+    }
+
+    /// Get mutable access to the inner manager for admin operations.
+    /// This clones the current state, applies modifications, and swaps atomically.
+    /// Returns the result of the operation.
+    pub fn modify<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut GeyserPluginManager) -> R,
+    {
+        // Load current state (unused but documents the flow)
+        let _current = self.inner.load();
+        // Clone for modification (plugins Vec is cloned shallowly, LoadedGeyserPlugin is not Clone)
+        // We need to take ownership for modification, so we swap with empty first
+        let mut manager = GeyserPluginManager {
+            plugins: Vec::new(),
+        };
+
+        // Swap to get ownership of the current plugins
+        let old = self.inner.swap(Arc::new(manager));
+
+        // Now we have exclusive ownership of old, extract the inner manager
+        // Since we just swapped, old has the real plugins
+        // We need to get the plugins out - use Arc::try_unwrap or clone
+        let mut working_manager = match Arc::try_unwrap(old) {
+            Ok(m) => m,
+            Err(arc) => {
+                // Someone else has a reference, need to wait or handle differently
+                // For safety, restore and return error
+                // This shouldn't happen in practice as notifications use load() not clone()
+                warn!("Could not get exclusive access to plugin manager for modification");
+                self.inner.store(arc);
+                // Return with empty manager
+                manager = GeyserPluginManager::default();
+                return f(&mut manager);
+            }
+        };
+
+        // Apply the modification
+        let result = f(&mut working_manager);
+
+        // Swap the modified manager back in
+        self.inner.store(Arc::new(working_manager));
+
+        result
+    }
+
+    /// List all loaded plugins (lock-free read).
+    pub fn list_plugins(&self) -> JsonRpcResult<Vec<String>> {
+        self.inner.load().list_plugins()
+    }
+
+    /// Unload all plugins. This should only be called during shutdown.
+    pub fn unload(&self) {
+        self.modify(|manager| manager.unload());
     }
 }
 

@@ -1,6 +1,6 @@
 /// Module responsible for notifying plugins about entries
 use {
-    crate::geyser_plugin_manager::GeyserPluginManager,
+    crate::geyser_plugin_manager::LockFreeGeyserPluginManager,
     agave_geyser_plugin_interface::geyser_plugin_interface::{
         ReplicaEntryInfoV2, ReplicaEntryInfoVersions,
     },
@@ -8,11 +8,11 @@ use {
     solana_clock::Slot,
     solana_entry::entry::EntrySummary,
     solana_ledger::entry_notifier_interface::EntryNotifier,
-    std::sync::{Arc, RwLock},
+    std::sync::Arc,
 };
 
 pub(crate) struct EntryNotifierImpl {
-    plugin_manager: Arc<RwLock<GeyserPluginManager>>,
+    plugin_manager: Arc<LockFreeGeyserPluginManager>,
 }
 
 impl EntryNotifier for EntryNotifierImpl {
@@ -23,7 +23,8 @@ impl EntryNotifier for EntryNotifierImpl {
         entry: &'a EntrySummary,
         starting_transaction_index: usize,
     ) {
-        let plugin_manager = self.plugin_manager.read().unwrap();
+        // Lock-free load of the plugin manager
+        let plugin_manager = self.plugin_manager.load();
         if plugin_manager.plugins.is_empty() {
             return;
         }
@@ -52,7 +53,7 @@ impl EntryNotifier for EntryNotifierImpl {
 }
 
 impl EntryNotifierImpl {
-    pub fn new(plugin_manager: Arc<RwLock<GeyserPluginManager>>) -> Self {
+    pub fn new(plugin_manager: Arc<LockFreeGeyserPluginManager>) -> Self {
         Self { plugin_manager }
     }
 

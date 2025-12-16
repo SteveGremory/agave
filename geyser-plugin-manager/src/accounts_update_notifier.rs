@@ -1,6 +1,6 @@
 /// Module responsible for notifying plugins of account updates
 use {
-    crate::geyser_plugin_manager::GeyserPluginManager,
+    crate::geyser_plugin_manager::LockFreeGeyserPluginManager,
     agave_geyser_plugin_interface::geyser_plugin_interface::{
         ReplicaAccountInfoV3, ReplicaAccountInfoVersions,
     },
@@ -12,11 +12,11 @@ use {
     solana_clock::Slot,
     solana_pubkey::Pubkey,
     solana_transaction::sanitized::SanitizedTransaction,
-    std::sync::{Arc, RwLock},
+    std::sync::Arc,
 };
 #[derive(Debug)]
 pub(crate) struct AccountsUpdateNotifierImpl {
-    plugin_manager: Arc<RwLock<GeyserPluginManager>>,
+    plugin_manager: Arc<LockFreeGeyserPluginManager>,
     snapshot_notifications_enabled: bool,
 }
 
@@ -50,7 +50,8 @@ impl AccountsUpdateNotifierInterface for AccountsUpdateNotifierImpl {
     }
 
     fn notify_end_of_restore_from_snapshot(&self) {
-        let plugin_manager = self.plugin_manager.read().unwrap();
+        // Lock-free load of the plugin manager
+        let plugin_manager = self.plugin_manager.load();
         if plugin_manager.plugins.is_empty() {
             return;
         }
@@ -77,7 +78,7 @@ impl AccountsUpdateNotifierInterface for AccountsUpdateNotifierImpl {
 
 impl AccountsUpdateNotifierImpl {
     pub fn new(
-        plugin_manager: Arc<RwLock<GeyserPluginManager>>,
+        plugin_manager: Arc<LockFreeGeyserPluginManager>,
         snapshot_notifications_enabled: bool,
     ) -> Self {
         AccountsUpdateNotifierImpl {
@@ -127,7 +128,8 @@ impl AccountsUpdateNotifierImpl {
         slot: Slot,
         is_startup: bool,
     ) {
-        let plugin_manager = self.plugin_manager.read().unwrap();
+        // Lock-free load of the plugin manager
+        let plugin_manager = self.plugin_manager.load();
 
         if plugin_manager.plugins.is_empty() {
             return;

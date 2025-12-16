@@ -4,7 +4,9 @@ use {
         block_metadata_notifier::BlockMetadataNotifierImpl,
         block_metadata_notifier_interface::BlockMetadataNotifierArc,
         entry_notifier::EntryNotifierImpl,
-        geyser_plugin_manager::{GeyserPluginManager, GeyserPluginManagerRequest},
+        geyser_plugin_manager::{
+            GeyserPluginManager, GeyserPluginManagerRequest, LockFreeGeyserPluginManager,
+        },
         slot_status_notifier::SlotStatusNotifierImpl,
         slot_status_observer::SlotStatusObserver,
         transaction_notifier::TransactionNotifierImpl,
@@ -33,7 +35,7 @@ use {
 /// The service managing the Geyser plugin workflow.
 pub struct GeyserPluginService {
     slot_status_observer: Option<SlotStatusObserver>,
-    plugin_manager: Arc<RwLock<GeyserPluginManager>>,
+    plugin_manager: Arc<LockFreeGeyserPluginManager>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     transaction_notifier: Option<TransactionNotifierArc>,
     entry_notifier: Option<EntryNotifierArc>,
@@ -93,7 +95,8 @@ impl GeyserPluginService {
             plugin_manager.transaction_notifications_enabled() || geyser_plugin_always_enabled;
         let entry_notifications_enabled =
             plugin_manager.entry_notifications_enabled() || geyser_plugin_always_enabled;
-        let plugin_manager = Arc::new(RwLock::new(plugin_manager));
+        // Use lock-free plugin manager for high-performance notification paths
+        let plugin_manager = Arc::new(LockFreeGeyserPluginManager::new(plugin_manager));
 
         let accounts_update_notifier: Option<AccountsUpdateNotifier> =
             if account_data_notifications_enabled {
@@ -197,12 +200,12 @@ impl GeyserPluginService {
         if let Some(mut slot_status_observer) = self.slot_status_observer {
             slot_status_observer.join()?;
         }
-        self.plugin_manager.write().unwrap().unload();
+        self.plugin_manager.unload();
         Ok(())
     }
 
     fn start_manager_rpc_handler(
-        plugin_manager: Arc<RwLock<GeyserPluginManager>>,
+        plugin_manager: Arc<LockFreeGeyserPluginManager>,
         request_receiver: Receiver<GeyserPluginManagerRequest>,
         exit: Arc<AtomicBool>,
     ) {
@@ -212,7 +215,7 @@ impl GeyserPluginService {
                 if let Ok(request) = request_receiver.recv_timeout(Duration::from_secs(5)) {
                     match request {
                         GeyserPluginManagerRequest::ListPlugins { response_sender } => {
-                            let plugin_list = plugin_manager.read().unwrap().list_plugins();
+                            let plugin_list = plugin_manager.list_plugins();
                             response_sender
                                 .send(plugin_list)
                                 .expect("Admin rpc service will be waiting for response");
@@ -224,9 +227,7 @@ impl GeyserPluginService {
                             response_sender,
                         } => {
                             let reload_result = plugin_manager
-                                .write()
-                                .unwrap()
-                                .reload_plugin(name, config_file);
+                                .modify(|manager| manager.reload_plugin(name, config_file));
                             response_sender
                                 .send(reload_result)
                                 .expect("Admin rpc service will be waiting for response");
@@ -237,7 +238,7 @@ impl GeyserPluginService {
                             response_sender,
                         } => {
                             let load_result =
-                                plugin_manager.write().unwrap().load_plugin(config_file);
+                                plugin_manager.modify(|manager| manager.load_plugin(config_file));
                             response_sender
                                 .send(load_result)
                                 .expect("Admin rpc service will be waiting for response");
@@ -247,7 +248,8 @@ impl GeyserPluginService {
                             ref name,
                             response_sender,
                         } => {
-                            let unload_result = plugin_manager.write().unwrap().unload_plugin(name);
+                            let unload_result =
+                                plugin_manager.modify(|manager| manager.unload_plugin(name));
                             response_sender
                                 .send(unload_result)
                                 .expect("Admin rpc service will be waiting for response");
