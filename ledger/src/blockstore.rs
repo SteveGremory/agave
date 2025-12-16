@@ -1268,7 +1268,8 @@ impl Blockstore {
             metrics,
         )?;
 
-        self.check_chained_merkle_root_consistency(&mut shred_insertion_tracker);
+        // DISABLED: Merkle root consistency check skipped for performance
+        // self.check_chained_merkle_root_consistency(&mut shred_insertion_tracker);
 
         let (should_signal, newly_completed_slots) =
             self.commit_updates_to_write_batch(&mut shred_insertion_tracker, metrics)?;

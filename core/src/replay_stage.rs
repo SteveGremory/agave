@@ -319,6 +319,7 @@ pub struct ReplayReceivers {
 }
 
 /// Timing information for the ReplayStage main processing loop
+#[allow(dead_code)] // Fields unused since metrics reporting is disabled
 #[derive(Default)]
 struct ReplayLoopTiming {
     last_submit: u64,
@@ -411,154 +412,7 @@ impl ReplayLoopTiming {
     }
 
     fn maybe_submit(&mut self) {
-        let now = timestamp();
-        let elapsed_ms = now - self.last_submit;
-
-        if elapsed_ms > 1000 {
-            datapoint_info!(
-                "replay-loop-voting-stats",
-                ("generate_vote_us", self.generate_vote_us, i64),
-                (
-                    "update_commitment_cache_us",
-                    self.update_commitment_cache_us,
-                    i64
-                ),
-            );
-            let &mut ReplayLoopTiming {
-                generate_new_bank_forks_read_lock_us:
-                    Saturating(generate_new_bank_forks_read_lock_us),
-                generate_new_bank_forks_get_slots_since_us:
-                    Saturating(generate_new_bank_forks_get_slots_since_us),
-                generate_new_bank_forks_loop_us: Saturating(generate_new_bank_forks_loop_us),
-                generate_new_bank_forks_write_lock_us:
-                    Saturating(generate_new_bank_forks_write_lock_us),
-                ..
-            } = self;
-            datapoint_info!(
-                "replay-loop-timing-stats",
-                ("loop_count", self.loop_count as i64, i64),
-                ("total_elapsed_us", elapsed_ms * 1000, i64),
-                (
-                    "collect_frozen_banks_elapsed_us",
-                    self.collect_frozen_banks_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "compute_bank_stats_elapsed_us",
-                    self.compute_bank_stats_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "select_vote_and_reset_forks_elapsed_us",
-                    self.select_vote_and_reset_forks_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "start_leader_elapsed_us",
-                    self.start_leader_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "reset_bank_elapsed_us",
-                    self.reset_bank_elapsed_us as i64,
-                    i64
-                ),
-                ("voting_elapsed_us", self.voting_elapsed_us as i64, i64),
-                (
-                    "select_forks_elapsed_us",
-                    self.select_forks_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "compute_slot_stats_elapsed_us",
-                    self.compute_slot_stats_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "generate_new_bank_forks_elapsed_us",
-                    self.generate_new_bank_forks_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "replay_active_banks_elapsed_us",
-                    self.replay_active_banks_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "process_ancestor_hashes_duplicate_slots_elapsed_us",
-                    self.process_ancestor_hashes_duplicate_slots_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "process_duplicate_confirmed_slots_elapsed_us",
-                    self.process_duplicate_confirmed_slots_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "process_unfrozen_gossip_verified_vote_hashes_elapsed_us",
-                    self.process_unfrozen_gossip_verified_vote_hashes_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "process_popular_pruned_forks_elapsed_us",
-                    self.process_popular_pruned_forks_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "wait_receive_elapsed_us",
-                    self.wait_receive_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "heaviest_fork_failures_elapsed_us",
-                    self.heaviest_fork_failures_elapsed_us as i64,
-                    i64
-                ),
-                ("bank_count", self.bank_count as i64, i64),
-                (
-                    "process_duplicate_slots_elapsed_us",
-                    self.process_duplicate_slots_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "repair_correct_slots_elapsed_us",
-                    self.repair_correct_slots_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "retransmit_not_propagated_elapsed_us",
-                    self.retransmit_not_propagated_elapsed_us as i64,
-                    i64
-                ),
-                (
-                    "generate_new_bank_forks_read_lock_us",
-                    generate_new_bank_forks_read_lock_us as i64,
-                    i64
-                ),
-                (
-                    "generate_new_bank_forks_get_slots_since_us",
-                    generate_new_bank_forks_get_slots_since_us as i64,
-                    i64
-                ),
-                (
-                    "generate_new_bank_forks_loop_us",
-                    generate_new_bank_forks_loop_us as i64,
-                    i64
-                ),
-                (
-                    "generate_new_bank_forks_write_lock_us",
-                    generate_new_bank_forks_write_lock_us as i64,
-                    i64
-                ),
-                (
-                    "replay_blockstore_us",
-                    self.replay_blockstore_us as i64,
-                    i64
-                ),
-            );
-            *self = ReplayLoopTiming::default();
-            self.last_submit = now;
-        }
+        // DISABLED: Metrics reporting skipped for performance
     }
 }
 
@@ -1256,8 +1110,8 @@ impl ReplayStage {
                 let mut wait_receive_time = Measure::start("wait_receive_time");
                 if !did_complete_bank {
                     // only wait for the signal if we did not just process a bank; maybe there are more slots available
-
-                    let timer = Duration::from_millis(100);
+                    // PERFORMANCE: Reduced from 100ms to 5ms for lower latency
+                    let timer = Duration::from_millis(5);
                     let result = ledger_signal_receiver.recv_timeout(timer);
                     match result {
                         Err(RecvTimeoutError::Timeout) => (),

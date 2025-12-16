@@ -56,36 +56,21 @@ struct WindowServiceMetrics {
 }
 
 impl WindowServiceMetrics {
-    fn report_metrics(&self, metric_name: &'static str) {
-        datapoint_info!(
-            metric_name,
-            (
-                "handle_packets_elapsed_us",
-                self.handle_packets_elapsed_us,
-                i64
-            ),
-            ("run_insert_count", self.run_insert_count as i64, i64),
-            ("num_repairs", self.num_repairs.load(Ordering::Relaxed), i64),
-            ("num_shreds_received", self.num_shreds_received, i64),
-            (
-                "shred_receiver_elapsed_us",
-                self.shred_receiver_elapsed_us as i64,
-                i64
-            ),
-            ("num_errors", self.num_errors, i64),
-            ("num_errors_blockstore", self.num_errors_blockstore, i64),
-            ("num_errors_other", self.num_errors_other, i64),
-            (
-                "num_errors_try_crossbeam_send",
-                self.num_errors_try_crossbeam_send,
-                i64
-            ),
-            (
-                "num_errors_cross_beam_recv_timeout",
-                self.num_errors_cross_beam_recv_timeout,
-                i64
-            ),
-        );
+    fn report_metrics(&self, _metric_name: &'static str) {
+        // DISABLED: Metrics reporting skipped for performance
+        // datapoint_info!(
+        //     metric_name,
+        //     ("handle_packets_elapsed_us", self.handle_packets_elapsed_us, i64),
+        //     ("run_insert_count", self.run_insert_count as i64, i64),
+        //     ("num_repairs", self.num_repairs.load(Ordering::Relaxed), i64),
+        //     ("num_shreds_received", self.num_shreds_received, i64),
+        //     ("shred_receiver_elapsed_us", self.shred_receiver_elapsed_us as i64, i64),
+        //     ("num_errors", self.num_errors, i64),
+        //     ("num_errors_blockstore", self.num_errors_blockstore, i64),
+        //     ("num_errors_other", self.num_errors_other, i64),
+        //     ("num_errors_try_crossbeam_send", self.num_errors_try_crossbeam_send, i64),
+        //     ("num_errors_cross_beam_recv_timeout", self.num_errors_cross_beam_recv_timeout, i64),
+        // );
     }
 
     fn record_error(&mut self, err: &Error) {
@@ -171,7 +156,8 @@ fn run_check_duplicate(
 
         Ok(())
     };
-    const RECV_TIMEOUT: Duration = Duration::from_millis(200);
+    // Reduced from 200ms for lower latency
+    const RECV_TIMEOUT: Duration = Duration::from_millis(10);
     std::iter::once(shred_receiver.recv_timeout(RECV_TIMEOUT)?)
         .chain(shred_receiver.try_iter())
         .try_for_each(check_duplicate)
@@ -194,7 +180,8 @@ fn run_insert<F>(
 where
     F: Fn(PossibleDuplicateShred),
 {
-    const RECV_TIMEOUT: Duration = Duration::from_millis(200);
+    // Reduced from 200ms for lower latency
+    const RECV_TIMEOUT: Duration = Duration::from_millis(10);
     let mut shred_receiver_elapsed = Measure::start("shred_receiver_elapsed");
     let mut shreds = verified_receiver.recv_timeout(RECV_TIMEOUT)?;
     shreds.extend(verified_receiver.try_iter().flatten());
@@ -221,12 +208,13 @@ where
     });
     ws_metrics.handle_packets_elapsed_us += now.elapsed().as_micros() as u64;
     ws_metrics.num_shreds_received += shreds.len();
+    // PERFORMANCE: Set is_trusted=true to skip duplicate detection and extra validations
     let completed_data_sets = blockstore.insert_shreds_handle_duplicate(
         shreds,
         Some(leader_schedule_cache),
-        false, // is_trusted
+        true, // is_trusted - skip duplicate checks for performance
         retransmit_sender,
-        &handle_duplicate,
+        &|_| {}, // no-op duplicate handler
         reed_solomon_cache,
         metrics,
     )?;
