@@ -208,7 +208,9 @@ impl Tvu {
         let (retransmit_sender, retransmit_receiver) =
             EvictingSender::new_bounded(CHANNEL_SIZE_RETRANSMIT_INGRESS);
 
-        let shred_sigverify = solana_turbine::sigverify_shreds::spawn_shred_sigverify(
+        // WARNING: Using spawn_shred_sigverify_disabled - shred signatures are NOT verified!
+        // This should only be used for testing/benchmarking purposes.
+        let shred_sigverify = solana_turbine::sigverify_shreds::spawn_shred_sigverify_disabled(
             cluster_info.clone(),
             bank_forks.clone(),
             leader_schedule_cache.clone(),

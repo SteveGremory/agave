@@ -75,3 +75,67 @@ impl SigVerifier for TransactionSigVerifier {
         batches
     }
 }
+
+/// A signature verifier that skips actual ED25519 verification.
+/// WARNING: This should only be used for testing/benchmarking purposes.
+/// Using this in production will accept transactions with invalid signatures.
+pub struct DisabledTransactionSigVerifier {
+    banking_stage_sender: BankingPacketSender,
+    forward_stage_sender: Option<Sender<(BankingPacketBatch, bool)>>,
+    reject_non_vote: bool,
+}
+
+impl DisabledTransactionSigVerifier {
+    pub fn new_reject_non_vote(
+        packet_sender: BankingPacketSender,
+        forward_stage_sender: Option<Sender<(BankingPacketBatch, bool)>>,
+    ) -> Self {
+        let mut new_self = Self::new(packet_sender, forward_stage_sender);
+        new_self.reject_non_vote = true;
+        new_self
+    }
+
+    pub fn new(
+        banking_stage_sender: BankingPacketSender,
+        forward_stage_sender: Option<Sender<(BankingPacketBatch, bool)>>,
+    ) -> Self {
+        Self {
+            banking_stage_sender,
+            forward_stage_sender,
+            reject_non_vote: false,
+        }
+    }
+}
+
+impl SigVerifier for DisabledTransactionSigVerifier {
+    type SendType = BankingPacketBatch;
+
+    fn send_packets(
+        &mut self,
+        packet_batches: Vec<PacketBatch>,
+    ) -> Result<(), SigVerifyServiceError<Self::SendType>> {
+        let banking_packet_batch = BankingPacketBatch::new(packet_batches);
+        if let Some(forward_stage_sender) = &self.forward_stage_sender {
+            self.banking_stage_sender
+                .send(banking_packet_batch.clone())?;
+            if let Err(TrySendError::Full(_)) =
+                forward_stage_sender.try_send((banking_packet_batch, self.reject_non_vote))
+            {
+                warn!("forwarding stage channel is full, dropping packets.");
+            }
+        } else {
+            self.banking_stage_sender.send(banking_packet_batch)?;
+        }
+
+        Ok(())
+    }
+
+    fn verify_batches(
+        &self,
+        mut batches: Vec<PacketBatch>,
+        _valid_packets: usize,
+    ) -> Vec<PacketBatch> {
+        sigverify::ed25519_verify_disabled(&mut batches);
+        batches
+    }
+}

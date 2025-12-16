@@ -74,6 +74,26 @@ pub fn verify_shreds(
     })
 }
 
+/// Disabled shred verification - marks all non-discarded shreds as valid without
+/// performing actual signature verification.
+/// WARNING: This should only be used for testing/benchmarking purposes.
+pub fn verify_shreds_disabled(
+    thread_pool: &ThreadPool,
+    batches: &[PacketBatch],
+) -> Vec<Vec<u8>> {
+    thread_pool.install(|| {
+        batches
+            .into_par_iter()
+            .map(|batch| {
+                batch
+                    .par_iter()
+                    .map(|packet| u8::from(!packet.meta().discard()))
+                    .collect()
+            })
+            .collect()
+    })
+}
+
 #[cfg(test)]
 fn sign_shred_cpu(keypair: &Keypair, packet: &mut PacketRefMut) {
     let sig = shred::layout::get_signature_range();

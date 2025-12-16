@@ -18,7 +18,7 @@ use {
         forwarding_stage::{
             spawn_forwarding_stage, ForwardAddressGetter, SpawnForwardingStageResult,
         },
-        sigverify::TransactionSigVerifier,
+        sigverify::DisabledTransactionSigVerifier,
         sigverify_stage::SigVerifyStage,
         staked_nodes_updater_service::StakedNodesUpdaterService,
         tpu_entry_notifier::TpuEntryNotifier,
@@ -291,8 +291,10 @@ impl Tpu {
             );
             SigVerifier::Remote(adapter)
         } else {
-            info!("starting regular sigverify stage");
-            let verifier = TransactionSigVerifier::new(
+            // WARNING: Using DisabledTransactionSigVerifier - signatures are NOT verified!
+            // This should only be used for testing/benchmarking purposes.
+            info!("starting DISABLED sigverify stage - signatures NOT verified!");
+            let verifier = DisabledTransactionSigVerifier::new(
                 non_vote_sender,
                 enable_block_production_forwarding.then(|| forward_stage_sender.clone()),
             );
@@ -305,7 +307,8 @@ impl Tpu {
         };
 
         let vote_sigverify_stage = {
-            let verifier = TransactionSigVerifier::new_reject_non_vote(
+            // WARNING: Using DisabledTransactionSigVerifier - signatures are NOT verified!
+            let verifier = DisabledTransactionSigVerifier::new_reject_non_vote(
                 tpu_vote_sender,
                 Some(forward_stage_sender),
             );

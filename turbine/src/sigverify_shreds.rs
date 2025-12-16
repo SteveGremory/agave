@@ -17,7 +17,7 @@ use {
             layout::{get_shred, resign_packet},
             wire::is_retransmitter_signed_variant,
         },
-        sigverify_shreds::{verify_shreds, LruCache, SlotPubkeys},
+        sigverify_shreds::{verify_shreds, verify_shreds_disabled, LruCache, SlotPubkeys},
     },
     solana_perf::{
         self,
@@ -131,6 +131,143 @@ pub fn spawn_shred_sigverify(
         .name("solShredVerifr".to_string())
         .spawn(run_shred_sigverify)
         .unwrap()
+}
+
+/// Spawns a shred sigverify thread that skips signature verification.
+/// WARNING: This should only be used for testing/benchmarking purposes.
+/// Using this in production will accept shreds with invalid signatures.
+pub fn spawn_shred_sigverify_disabled(
+    cluster_info: Arc<ClusterInfo>,
+    bank_forks: Arc<RwLock<BankForks>>,
+    _leader_schedule_cache: Arc<LeaderScheduleCache>,
+    shred_fetch_receiver: Receiver<PacketBatch>,
+    retransmit_sender: EvictingSender<Vec<shred::Payload>>,
+    verified_sender: Sender<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
+    num_sigverify_threads: NonZeroUsize,
+) -> JoinHandle<()> {
+    let mut stats = ShredSigVerifyStats::new(Instant::now());
+    let thread_pool = ThreadPoolBuilder::new()
+        .num_threads(num_sigverify_threads.get())
+        .thread_name(|i| format!("solSvrfyShred{i:02}"))
+        .build()
+        .expect("new rayon threadpool");
+    let run_shred_sigverify = move || {
+        let mut rng = rand::thread_rng();
+        let mut deduper = Deduper::<2, [u8]>::new(&mut rng, DEDUPER_NUM_BITS);
+        let mut shred_buffer = Vec::with_capacity(SIGVERIFY_SHRED_BATCH_SIZE);
+        loop {
+            if deduper.maybe_reset(&mut rng, DEDUPER_FALSE_POSITIVE_RATE, DEDUPER_RESET_CYCLE) {
+                stats.num_deduper_saturations += 1;
+            }
+            let keypair = cluster_info.keypair();
+            match run_shred_sigverify_disabled(
+                &thread_pool,
+                &keypair,
+                &bank_forks,
+                &deduper,
+                &shred_fetch_receiver,
+                &retransmit_sender,
+                &verified_sender,
+                &mut stats,
+                &mut shred_buffer,
+            ) {
+                Ok(()) => (),
+                Err(ShredSigverifyError::RecvTimeout) => (),
+                Err(ShredSigverifyError::RecvDisconnected) => break,
+                Err(ShredSigverifyError::SendError) => break,
+            }
+            stats.maybe_submit();
+        }
+    };
+    Builder::new()
+        .name("solShredVerifr".to_string())
+        .spawn(run_shred_sigverify)
+        .unwrap()
+}
+
+/// Disabled version of run_shred_sigverify that skips signature verification.
+#[allow(clippy::too_many_arguments)]
+fn run_shred_sigverify_disabled<const K: usize>(
+    thread_pool: &ThreadPool,
+    _keypair: &Keypair,
+    _bank_forks: &RwLock<BankForks>,
+    deduper: &Deduper<K, [u8]>,
+    shred_fetch_receiver: &Receiver<PacketBatch>,
+    retransmit_sender: &EvictingSender<Vec<shred::Payload>>,
+    verified_sender: &Sender<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
+    stats: &mut ShredSigVerifyStats,
+    shred_buffer: &mut Vec<PacketBatch>,
+) -> Result<(), ShredSigverifyError> {
+    const RECV_TIMEOUT: Duration = Duration::from_secs(1);
+    let packets = shred_fetch_receiver.recv_timeout(RECV_TIMEOUT)?;
+    stats.num_packets += packets.len();
+    shred_buffer.push(packets);
+    for packets in shred_fetch_receiver
+        .try_iter()
+        .take(SIGVERIFY_SHRED_BATCH_SIZE - 1)
+    {
+        stats.num_packets += packets.len();
+        shred_buffer.push(packets);
+    }
+
+    let now = Instant::now();
+    stats.num_iters += 1;
+    stats.num_batches += shred_buffer.len();
+    stats.num_discards_pre += count_discards(shred_buffer);
+    // Deduplication still runs to prevent processing the same shred twice
+    stats.num_duplicates += thread_pool.install(|| {
+        shred_buffer
+            .par_iter_mut()
+            .flatten()
+            .filter(|packet| {
+                !packet.meta().discard()
+                    && shred::wire::get_shred(packet.as_ref())
+                        .map(|shred| deduper.dedup(shred))
+                        .unwrap_or(true)
+                    && !packet.meta().repair()
+            })
+            .map(|mut packet| packet.meta_mut().set_discard(true))
+            .count()
+    });
+    // Skip signature verification - just mark all non-discarded packets as valid
+    verify_packets_disabled(thread_pool, shred_buffer);
+    stats.num_discards_post += count_discards(shred_buffer);
+    // Skip retransmitter signature verification and resigning
+    // Extract shred payload from packets, and separate out repaired shreds.
+    let (shreds, repairs): (Vec<_>, Vec<_>) = shred_buffer
+        .iter()
+        .flat_map(|batch| batch.iter())
+        .filter(|packet| !packet.meta().discard())
+        .filter_map(|packet| {
+            let shred = shred::layout::get_shred(packet)?.to_vec();
+            Some((shred, packet.meta().repair()))
+        })
+        .partition_map(|(shred, repair)| {
+            if repair {
+                Either::Right(shred::Payload::from(shred))
+            } else {
+                Either::Left(shred::Payload::from(shred))
+            }
+        });
+    stats.num_retransmit_shreds += shreds.len();
+    if let Err(send_err) = retransmit_sender.try_send(shreds.clone()) {
+        match send_err {
+            crossbeam_channel::TrySendError::Full(v) => {
+                stats.num_retransmit_stage_overflow_shreds += v.len();
+            }
+            _ => unreachable!("EvictingSender holds on to both ends of the channel"),
+        }
+    }
+    let shreds = shreds
+        .into_iter()
+        .map(|shred| (shred, /*is_repaired:*/ false));
+    let repairs = repairs
+        .into_iter()
+        .map(|shred| (shred, /*is_repaired:*/ true));
+    verified_sender.send(shreds.chain(repairs).collect())?;
+    stats.elapsed_micros += now.elapsed().as_micros() as u64;
+    shred_buffer.clear();
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -399,6 +536,13 @@ fn verify_packets(
             .chain(std::iter::once((Slot::MAX, Pubkey::default())))
             .collect();
     let out = verify_shreds(thread_pool, packets, &leader_slots, cache);
+    solana_perf::sigverify::mark_disabled(packets, &out);
+}
+
+/// Disabled shred verification - marks all shreds as valid without signature verification.
+/// WARNING: This should only be used for testing/benchmarking purposes.
+fn verify_packets_disabled(thread_pool: &ThreadPool, packets: &mut [PacketBatch]) {
+    let out = verify_shreds_disabled(thread_pool, packets);
     solana_perf::sigverify::mark_disabled(packets, &out);
 }
 
