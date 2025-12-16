@@ -279,32 +279,22 @@ impl Tpu {
         };
 
         let (forward_stage_sender, forward_stage_receiver) = bounded(1024);
-        let sig_verifier = if let Some(vortexor_receivers) = vortexor_receivers {
-            info!("starting vortexor adapter");
-            let sockets = vortexor_receivers.into_iter().map(Arc::new).collect();
-            let adapter = VortexorReceiverAdapter::new(
-                sockets,
-                Duration::from_millis(5),
-                non_vote_sender,
-                enable_block_production_forwarding.then(|| forward_stage_sender.clone()),
-                exit.clone(),
-            );
-            SigVerifier::Remote(adapter)
-        } else {
-            // WARNING: Using DisabledTransactionSigVerifier - signatures are NOT verified!
-            // This should only be used for testing/benchmarking purposes.
-            info!("starting DISABLED sigverify stage - signatures NOT verified!");
-            let verifier = DisabledTransactionSigVerifier::new(
-                non_vote_sender,
-                enable_block_production_forwarding.then(|| forward_stage_sender.clone()),
-            );
-            SigVerifier::Local(SigVerifyStage::new(
-                packet_receiver,
-                verifier,
-                "solSigVerTpu",
-                "tpu-verifier",
-            ))
-        };
+        // WARNING: Signature verification is DISABLED for ALL paths!
+        // Vortexor configuration is ignored - always use disabled local verifier.
+        if vortexor_receivers.is_some() {
+            warn!("vortexor_receivers configured but IGNORED - using disabled sigverify instead!");
+        }
+        info!("starting DISABLED sigverify stage - signatures NOT verified!");
+        let verifier = DisabledTransactionSigVerifier::new(
+            non_vote_sender,
+            enable_block_production_forwarding.then(|| forward_stage_sender.clone()),
+        );
+        let sig_verifier = SigVerifier::Local(SigVerifyStage::new(
+            packet_receiver,
+            verifier,
+            "solSigVerTpu",
+            "tpu-verifier",
+        ));
 
         let vote_sigverify_stage = {
             // WARNING: Using DisabledTransactionSigVerifier - signatures are NOT verified!

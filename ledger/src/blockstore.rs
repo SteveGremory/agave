@@ -59,6 +59,7 @@ use {
         VersionedConfirmedBlock, VersionedConfirmedBlockWithEntries,
         VersionedTransactionWithStatusMeta,
     },
+    parking_lot::Mutex as ParkingLotMutex,
     std::{
         borrow::Cow,
         cell::RefCell,
@@ -104,8 +105,9 @@ pub use {
 pub const MAX_REPLAY_WAKE_UP_SIGNALS: usize = 32;
 pub const MAX_COMPLETED_SLOTS_IN_CHANNEL: usize = 100_000;
 
-pub type CompletedSlotsSender = Sender<Vec<Slot>>;
-pub type CompletedSlotsReceiver = Receiver<Vec<Slot>>;
+// Use Arc<Vec<Slot>> to avoid cloning when sending to multiple subscribers
+pub type CompletedSlotsSender = Sender<Arc<Vec<Slot>>>;
+pub type CompletedSlotsReceiver = Receiver<Arc<Vec<Slot>>>;
 
 // Contiguous, sorted and non-empty ranges of shred indices:
 //     completed_ranges[i].start < completed_ranges[i].end
@@ -266,9 +268,11 @@ pub struct Blockstore {
     transaction_status_cf: LedgerColumn<cf::TransactionStatus>,
     transaction_status_index_cf: LedgerColumn<cf::TransactionStatusIndex>,
 
-    highest_primary_index_slot: RwLock<Option<Slot>>,
+    // Use AtomicU64 with u64::MAX as sentinel for None (lock-free reads)
+    highest_primary_index_slot: AtomicU64,
     max_root: AtomicU64,
-    insert_shreds_lock: Mutex<()>,
+    // Use parking_lot::Mutex for better performance on the hot shred insertion path
+    insert_shreds_lock: ParkingLotMutex<()>,
     new_shreds_signals: Mutex<Vec<Sender<bool>>>,
     completed_slots_senders: Mutex<Vec<CompletedSlotsSender>>,
     pub lowest_cleanup_slot: RwLock<Slot>,
@@ -443,10 +447,10 @@ impl Blockstore {
             transaction_memos_cf,
             transaction_status_cf,
             transaction_status_index_cf,
-            highest_primary_index_slot: RwLock::<Option<Slot>>::default(),
+            highest_primary_index_slot: AtomicU64::new(u64::MAX), // u64::MAX = None
             new_shreds_signals: Mutex::default(),
             completed_slots_senders: Mutex::default(),
-            insert_shreds_lock: Mutex::<()>::default(),
+            insert_shreds_lock: ParkingLotMutex::new(()),
             max_root,
             lowest_cleanup_slot: RwLock::<Slot>::default(),
             slots_stats: SlotsStats::default(),
@@ -1229,9 +1233,9 @@ impl Blockstore {
     ) -> Result<InsertResults> {
         let mut total_start = Measure::start("Total elapsed");
 
-        // Acquire the insertion lock
+        // Acquire the insertion lock (parking_lot::Mutex for better performance)
         let mut start = Measure::start("Blockstore lock");
-        let _lock = self.insert_shreds_lock.lock().unwrap();
+        let _lock = self.insert_shreds_lock.lock();
         start.stop();
         metrics.insert_lock_elapsed_us += start.as_us();
 
@@ -1359,7 +1363,7 @@ impl Blockstore {
     /// try to perform read-modify-write operation on [`cf::SlotMeta`] column
     /// family.
     pub fn clear_unconfirmed_slot(&self, slot: Slot) {
-        let _lock = self.insert_shreds_lock.lock().unwrap();
+        let _lock = self.insert_shreds_lock.lock();
         // Purge the slot and insert an empty `SlotMeta` with only the `next_slots` field preserved.
         // Shreds inherently know their parent slot, and a parent's SlotMeta `next_slots` list
         // will be updated when the child is inserted (see `Blockstore::handle_chaining()`).
@@ -2825,11 +2829,17 @@ impl Blockstore {
     }
 
     fn get_highest_primary_index_slot(&self) -> Option<Slot> {
-        *self.highest_primary_index_slot.read().unwrap()
+        let slot = self.highest_primary_index_slot.load(Ordering::Relaxed);
+        if slot == u64::MAX {
+            None
+        } else {
+            Some(slot)
+        }
     }
 
     fn set_highest_primary_index_slot(&self, slot: Option<Slot>) {
-        *self.highest_primary_index_slot.write().unwrap() = slot;
+        let value = slot.unwrap_or(u64::MAX);
+        self.highest_primary_index_slot.store(value, Ordering::Relaxed);
     }
 
     fn update_highest_primary_index_slot(&self) -> Result<()> {
@@ -2852,10 +2862,15 @@ impl Blockstore {
     }
 
     fn maybe_cleanup_highest_primary_index_slot(&self, oldest_slot: Slot) -> Result<()> {
-        let mut w_highest_primary_index_slot = self.highest_primary_index_slot.write().unwrap();
-        if let Some(highest_primary_index_slot) = *w_highest_primary_index_slot {
-            if oldest_slot > highest_primary_index_slot {
-                *w_highest_primary_index_slot = None;
+        // Atomic compare-and-swap: if current value < oldest_slot, set to None (u64::MAX)
+        let current = self.highest_primary_index_slot.load(Ordering::Relaxed);
+        if current != u64::MAX && oldest_slot > current {
+            // Only set to None if the value hasn't changed
+            if self
+                .highest_primary_index_slot
+                .compare_exchange(current, u64::MAX, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 self.db.set_clean_slot_0(true);
             }
         }
@@ -4696,7 +4711,7 @@ fn get_last_hash<'a>(iterator: impl Iterator<Item = &'a Entry> + 'a) -> Option<H
 
 fn send_signals(
     new_shreds_signals: &[Sender<bool>],
-    completed_slots_senders: &[Sender<Vec<u64>>],
+    completed_slots_senders: &[Sender<Arc<Vec<u64>>>],
     should_signal: bool,
     newly_completed_slots: Vec<u64>,
 ) {
@@ -4715,14 +4730,11 @@ fn send_signals(
     }
 
     if !completed_slots_senders.is_empty() && !newly_completed_slots.is_empty() {
-        let mut slots: Vec<_> = (0..completed_slots_senders.len() - 1)
-            .map(|_| newly_completed_slots.clone())
-            .collect();
+        // Wrap in Arc to share cheaply across all subscribers (no cloning of the Vec)
+        let slots = Arc::new(newly_completed_slots);
 
-        slots.push(newly_completed_slots);
-
-        for (signal, slots) in completed_slots_senders.iter().zip(slots.into_iter()) {
-            let res = signal.try_send(slots);
+        for signal in completed_slots_senders {
+            let res = signal.try_send(Arc::clone(&slots));
             if let Err(TrySendError::Full(_)) = res {
                 datapoint_error!(
                     "blockstore_error",
@@ -9062,11 +9074,19 @@ pub mod tests {
                     &AddressSignatureMeta { writeable: false },
                 )?;
             }
-            let mut w_highest_primary_index_slot = self.highest_primary_index_slot.write().unwrap();
-            if w_highest_primary_index_slot.is_none()
-                || w_highest_primary_index_slot.is_some_and(|highest_slot| highest_slot < slot)
-            {
-                *w_highest_primary_index_slot = Some(slot);
+            // Atomically update highest_primary_index_slot if this slot is higher
+            loop {
+                let current = self.highest_primary_index_slot.load(Ordering::Relaxed);
+                if current != u64::MAX && current >= slot {
+                    break; // Current value is already >= slot
+                }
+                if self
+                    .highest_primary_index_slot
+                    .compare_exchange(current, slot, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    break;
+                }
             }
             Ok(())
         }

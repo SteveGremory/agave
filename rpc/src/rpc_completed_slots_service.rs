@@ -41,13 +41,13 @@ impl RpcCompletedSlotsService {
                         break;
                     }
                     Ok(slots) => {
-                        for slot in slots {
+                        for slot in slots.iter() {
                             rpc_subscriptions.notify_slot_update(SlotUpdate::Completed {
-                                slot,
+                                slot: *slot,
                                 timestamp: timestamp(),
                             });
                             if let Some(slot_status_notifier) = &slot_status_notifier {
-                                slot_status_notifier.read().unwrap().notify_completed(slot);
+                                slot_status_notifier.read().unwrap().notify_completed(*slot);
                             }
                         }
                     }

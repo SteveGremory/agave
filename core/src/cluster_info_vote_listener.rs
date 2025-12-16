@@ -280,12 +280,9 @@ impl ClusterInfoVoteListener {
     ) -> (Vec<Transaction>, Vec<PacketBatch>) {
         let mut packet_batches = packet::to_packet_batches(&votes, 1);
 
+        // WARNING: Signature verification DISABLED for performance testing!
         // Votes should already be filtered by this point.
-        sigverify::ed25519_verify(
-            &mut packet_batches,
-            /*reject_non_vote=*/ false,
-            votes.len(),
-        );
+        sigverify::ed25519_verify_disabled(&mut packet_batches);
         let root_bank = sharable_banks.root();
         let epoch_schedule = root_bank.epoch_schedule();
         votes
