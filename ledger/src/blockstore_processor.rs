@@ -369,6 +369,15 @@ impl ExecuteBatchesInternalMetrics {
     }
 }
 
+/// Result from executing a single batch, used for lock-free aggregation
+struct BatchExecutionResult {
+    result: Result<()>,
+    thread_index: usize,
+    execute_us: u64,
+    transaction_count: u64,
+    timings: ExecuteTimings,
+}
+
 fn execute_batches_internal(
     bank: &Arc<Bank>,
     replay_tx_thread_pool: &ThreadPool,
@@ -379,18 +388,17 @@ fn execute_batches_internal(
     prioritization_fee_cache: Option<&PrioritizationFeeCache>,
 ) -> Result<ExecuteBatchesInternalMetrics> {
     assert!(!batches.is_empty());
-    let execution_timings_per_thread: Mutex<HashMap<usize, ThreadExecuteTimings>> =
-        Mutex::new(HashMap::new());
 
     let mut execute_batches_elapsed = Measure::start("execute_batches_elapsed");
-    let results: Vec<Result<()>> = replay_tx_thread_pool.install(|| {
+    // Execute batches in parallel without any synchronization - each returns its own result
+    let batch_results: Vec<BatchExecutionResult> = replay_tx_thread_pool.install(|| {
         batches
             .into_par_iter()
             .map(|transaction_batch| {
                 let transaction_count =
                     transaction_batch.batch.sanitized_transactions().len() as u64;
                 let mut timings = ExecuteTimings::default();
-                let (result, execute_batches_us) = measure_us!(execute_batch(
+                let (result, execute_us) = measure_us!(execute_batch(
                     transaction_batch,
                     bank,
                     transaction_status_sender,
@@ -402,37 +410,49 @@ fn execute_batches_internal(
                 ));
 
                 let thread_index = replay_tx_thread_pool.current_thread_index().unwrap();
-                execution_timings_per_thread
-                    .lock()
-                    .unwrap()
-                    .entry(thread_index)
-                    .and_modify(|thread_execution_time| {
-                        let ThreadExecuteTimings {
-                            total_thread_us,
-                            total_transactions_executed,
-                            execute_timings: total_thread_execute_timings,
-                        } = thread_execution_time;
-                        *total_thread_us += execute_batches_us;
-                        *total_transactions_executed += transaction_count;
-                        total_thread_execute_timings
-                            .saturating_add_in_place(ExecuteTimingType::TotalBatchesLen, 1);
-                        total_thread_execute_timings.accumulate(&timings);
-                    })
-                    .or_insert(ThreadExecuteTimings {
-                        total_thread_us: Saturating(execute_batches_us),
-                        total_transactions_executed: Saturating(transaction_count),
-                        execute_timings: timings,
-                    });
-                result
+                BatchExecutionResult {
+                    result,
+                    thread_index,
+                    execute_us,
+                    transaction_count,
+                    timings,
+                }
             })
             .collect()
     });
     execute_batches_elapsed.stop();
 
+    // Aggregate results sequentially after parallel execution - no lock contention
+    let mut execution_timings_per_thread: HashMap<usize, ThreadExecuteTimings> = HashMap::new();
+    let mut results: Vec<Result<()>> = Vec::with_capacity(batch_results.len());
+    for batch_result in batch_results {
+        results.push(batch_result.result);
+        execution_timings_per_thread
+            .entry(batch_result.thread_index)
+            .and_modify(|thread_execution_time| {
+                let ThreadExecuteTimings {
+                    total_thread_us,
+                    total_transactions_executed,
+                    execute_timings: total_thread_execute_timings,
+                } = thread_execution_time;
+                *total_thread_us += batch_result.execute_us;
+                *total_transactions_executed += batch_result.transaction_count;
+                total_thread_execute_timings
+                    .saturating_add_in_place(ExecuteTimingType::TotalBatchesLen, 1);
+                total_thread_execute_timings.accumulate(&batch_result.timings);
+            })
+            .or_insert(ThreadExecuteTimings {
+                total_thread_us: Saturating(batch_result.execute_us),
+                total_transactions_executed: Saturating(batch_result.transaction_count),
+                execute_timings: batch_result.timings,
+            });
+    }
+
+    // Check for errors
     first_err(&results)?;
 
     Ok(ExecuteBatchesInternalMetrics {
-        execution_timings_per_thread: execution_timings_per_thread.into_inner().unwrap(),
+        execution_timings_per_thread,
         total_batches_len: batches.len() as u64,
         execute_batches_us: execute_batches_elapsed.as_us(),
     })

@@ -100,7 +100,8 @@ pub use {
     rocksdb::properties as RocksProperties,
 };
 
-pub const MAX_REPLAY_WAKE_UP_SIGNALS: usize = 1;
+// Increased from 1 to allow batching of wake-up signals during high shred throughput
+pub const MAX_REPLAY_WAKE_UP_SIGNALS: usize = 32;
 pub const MAX_COMPLETED_SLOTS_IN_CHANNEL: usize = 100_000;
 
 pub type CompletedSlotsSender = Sender<Vec<Slot>>;

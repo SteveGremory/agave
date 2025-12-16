@@ -2967,7 +2967,7 @@ impl ReplayStage {
                         bank_slot,
                         replay_result: None,
                     };
-                    let my_pubkey = &my_pubkey.clone();
+                    let my_pubkey = my_pubkey;
                     trace!(
                         "Replay active bank: slot {}, thread_idx {}",
                         bank_slot,
@@ -3007,7 +3007,7 @@ impl ReplayStage {
                         ForkProgress::new_from_bank(
                             &bank,
                             my_pubkey,
-                            &vote_account.clone(),
+                            vote_account,
                             prev_leader_slot,
                             num_blocks_on_fork,
                             num_dropped_blocks_on_fork,
@@ -3029,7 +3029,7 @@ impl ReplayStage {
                             &replay_progress,
                             transaction_status_sender,
                             entry_notification_sender,
-                            &replay_vote_sender.clone(),
+                            replay_vote_sender,
                             log_messages_bytes_limit,
                             prioritization_fee_cache,
                         );
@@ -3070,7 +3070,6 @@ impl ReplayStage {
             bank_slot,
             replay_result: None,
         };
-        let my_pubkey = &my_pubkey.clone();
         trace!("Replay active bank: slot {bank_slot}");
         if progress.get(&bank_slot).map(|p| p.is_dead).unwrap_or(false) {
             // If the fork was marked as dead, don't replay it
@@ -3099,7 +3098,7 @@ impl ReplayStage {
                 ForkProgress::new_from_bank(
                     &bank,
                     my_pubkey,
-                    &vote_account.clone(),
+                    vote_account,
                     prev_leader_slot,
                     num_blocks_on_fork,
                     num_dropped_blocks_on_fork,
@@ -3116,7 +3115,7 @@ impl ReplayStage {
                     &bank_progress.replay_progress,
                     transaction_status_sender,
                     entry_notification_sender,
-                    &replay_vote_sender.clone(),
+                    replay_vote_sender,
                     log_messages_bytes_limit,
                     prioritization_fee_cache,
                 );
